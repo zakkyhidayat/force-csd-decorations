@@ -9,6 +9,10 @@ if ! command -v kpackagetool6 &>/dev/null; then
     exit 1
 fi
 
+# Rebuild the .kwinscript bundle from source before installing
+echo "Building ${SCRIPT_ID}.kwinscript..."
+(cd "$SCRIPT_DIR" && zip -r "${SCRIPT_ID}.kwinscript" force-csd-decorations/ -x "*.pyc" "*/__pycache__/*" > /dev/null)
+
 # Upgrade if already installed, otherwise install
 if kpackagetool6 --type KWin/Script --show "$SCRIPT_ID" &>/dev/null; then
     echo "Upgrading $SCRIPT_ID..."
@@ -18,7 +22,7 @@ else
     kpackagetool6 --type KWin/Script --install "$SCRIPT_DIR/force-csd-decorations"
 fi
 
-# Enable the script via dbus if KWin is running
+# Reload KWin scripting engine if KWin is running
 if qdbus6 org.kde.KWin /Scripting &>/dev/null 2>&1; then
     echo "Reloading KWin scripts..."
     qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start 2>/dev/null || true
