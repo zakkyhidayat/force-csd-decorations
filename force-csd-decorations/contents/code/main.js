@@ -3,178 +3,170 @@
 (function (workspace, readConfig) {
     const csd = new CSD();
 
-    workspace.clientAdded.connect(function (client) {
-        if (client) {
-            csd.add(client);
+    workspace.windowAdded.connect(function (window) {
+        if (window) {
+            csd.add(window);
         }
     });
 
-    workspace.clientActivated.connect(function (client) {
-        if (client) {
-            csd.activate(client);
+    workspace.windowActivated.connect(function (window) {
+        if (window) {
+            csd.activate(window);
         }
     });
 
-    workspace.clientRemoved.connect(function (client) {
-        if (client) {
-            csd.remove(client);
+    workspace.windowRemoved.connect(function (window) {
+        if (window) {
+            csd.remove(window);
         }
     });
 
-    workspace.clientMaximizeSet.connect(function (client) {
-        if (client && csd.add(client)) {
-            client.noBorder = false;
+    // Plasma 6: windowMaximizeSet passes (window, horizontal, vertical)
+    workspace.windowMaximizeSet.connect(function (window) {
+        if (window && csd.add(window)) {
+            window.noBorder = false;
         }
     });
 
     function CSD() {
-        const clients = new ClientSet();
-        const pending = new ClientSet();
+        const windows = new WindowSet();
+        const pending = new WindowSet();
+        // Store per-window handlers so we can disconnect cleanly
+        const handlers = new Map();
 
-        this.add = function (client) {
-            if (clients.add(client)) {
-                logClient(client, 'added');
+        this.add = function (window) {
+            if (windows.add(window)) {
+                logWindow(window, 'added');
 
-                pending.add(client);
-                client.windowShown.connect(activateClient);
+                pending.add(window);
+
+                const handler = function () { activateWindow(window); };
+                handlers.set(window, handler);
+                window.windowShown.connect(handler);
             }
 
-            return clients.has(client);
+            return windows.has(window);
         };
 
-        this.activate = function (client) {
-            if (pending.has(client)) {
-                logClient(client, 'activating...');
+        this.activate = function (window) {
+            if (pending.has(window)) {
+                logWindow(window, 'activating...');
 
-                client.setMaximize(true, true);
-            }
-        };
-
-        this.remove = function (client) {
-            if (clients.remove(client)) {
-                logClient(client, 'removed');
-
-                pending.remove(client);
-                client.windowShown.disconnect(activateClient);
+                window.setMaximize(true, true);
             }
         };
 
-        function activateClient(client) {
-            if (pending.has(client)) {
-                logClient(client, 'activated');
+        this.remove = function (window) {
+            if (windows.remove(window)) {
+                logWindow(window, 'removed');
 
-                pending.remove(client);
-                client.windowShown.disconnect(activateClient);
-                client.setMaximize(false, false);
+                pending.remove(window);
+                disconnectHandler(window);
+            }
+        };
+
+        function activateWindow(window) {
+            if (pending.has(window)) {
+                logWindow(window, 'activated');
+
+                pending.remove(window);
+                disconnectHandler(window);
+                window.setMaximize(false, false);
+            }
+        }
+
+        function disconnectHandler(window) {
+            const handler = handlers.get(window);
+            if (handler) {
+                window.windowShown.disconnect(handler);
+                handlers.delete(window);
             }
         }
     }
 
-    function ClientSet() {
-        const clients = [];
+    function WindowSet() {
+        const windows = [];
         const specialResourceClasses = ['plasmashell', 'lattedock', 'firefox'];
 
-        // @see https://api.kde.org/frameworks/kwindowsystem/html/netwm__def_8h_source.html
-        const specialWindowTypes = [
-            -1, // 'NET::Unknown'
-            1, // 'NET::Desktop'
-            2, // 'NET::Dock',
-            7, // 'NET::TopMenu',
-            9, // 'NET::Splash',
-            10, // 'NET::DropdownMenu',
-            11, // 'NET::PopupMenu',
-            12, // 'NET::Tooltip',
-            13, // 'NET::Notification',
-            14, // 'NET::ComboBox',
-            15, // 'NET::DNDIcon',
-            16, // 'NET::OnScreenDisplay',
-            17, // 'NET::CriticalNotification',
-            18, // 'NET::AppletPopup',
-        ];
-
-        this.has = function (client) {
-            return clients.indexOf(client) !== -1;
+        this.has = function (window) {
+            return windows.indexOf(window) !== -1;
         };
 
-        this.add = function (client) {
-            if (this.has(client)) {
+        this.add = function (window) {
+            if (this.has(window)) {
                 return false;
             }
 
-            if (!clientIsDecoratable(client)) {
+            if (!windowIsDecoratable(window)) {
                 return false;
             }
 
-            clients.push(client);
+            windows.push(window);
 
             return true;
         };
 
-        this.remove = function (client) {
-            const index = clients.indexOf(client);
+        this.remove = function (window) {
+            const index = windows.indexOf(window);
 
             if (index === -1) {
                 return false;
             }
 
-            clients.splice(index, 1);
+            windows.splice(index, 1);
 
             return true;
         };
 
         // @see https://techbase.kde.org/Projects/KWin/Window_Decoration_Policy
-        function clientIsDecoratable(client) {
-            if (specialResourceClasses.indexOf(client.resourceClass) !== -1) {
+        function windowIsDecoratable(window) {
+            if (specialResourceClasses.indexOf(window.resourceClass) !== -1) {
                 return false;
             }
 
-            if (specialWindowTypes.indexOf(client.windowType) !== -1) {
+            if (!window.managed) {
                 return false;
             }
 
-            if (!client.managed) {
-                return false;
-            }
-
+            // Plasma 6: use boolean window-type properties instead of windowType integer
             const shouldNotDecorate = [
-                client.fullScreen,
-                client.keepAbove && client.shaped,
-                client.specialWindow,
-                client.desktopWindow,
-                client.dock,
-                client.splash,
-                client.dropdownMenu,
-                client.popupMenu,
-                client.tooltip,
-                client.notification,
-                client.comboBox,
-                client.dndIcon,
-                client.criticalNotification,
-                client.appletPopup,
-                client.popupWindow,
+                window.fullScreen,
+                window.keepAbove && window.shaped,
+                window.specialWindow,
+                window.isDesktop,
+                window.isDock,
+                window.isSplash,
+                window.isDropdownMenu,
+                window.isPopupMenu,
+                window.isTooltip,
+                window.isNotification,
+                window.isComboBox,
+                window.isDNDIcon,
+                window.isCriticalNotification,
+                window.isAppletPopup,
+                window.isPopupWindow,
             ].indexOf(true);
 
             if (shouldNotDecorate !== -1) {
                 return false;
             }
 
-            return client.clientSideDecorated
-                && client.noBorder;
+            return window.clientSideDecorated
+                && window.noBorder;
         }
     }
 
-    function logClient(client, context) {
+    function logWindow(window, context) {
         if (!readConfig('isDebugging', false)) {
             return;
         }
 
         console.debug(JSON.stringify({
-            isActive: workspace.activeClient === client,
-            resourceClass: client.resourceClass,
-            windowType: client.windowType,
-            clientSideDecorated: client.clientSideDecorated,
-            noBorder: client.noBorder,
-            maximizable: client.maximizable,
+            isActive: workspace.activeWindow === window,
+            resourceClass: window.resourceClass,
+            clientSideDecorated: window.clientSideDecorated,
+            noBorder: window.noBorder,
+            maximizable: window.maximizable,
             context: context,
         }));
     }
