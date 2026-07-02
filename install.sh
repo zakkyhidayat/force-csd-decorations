@@ -13,13 +13,12 @@ fi
 echo "Building ${SCRIPT_ID}.kwinscript..."
 (cd "$SCRIPT_DIR" && zip -r "${SCRIPT_ID}.kwinscript" force-csd-decorations/ -x "*.pyc" "*/__pycache__/*" > /dev/null)
 
-# Upgrade if already installed, otherwise install
-if kpackagetool6 --type KWin/Script --show "$SCRIPT_ID" &>/dev/null; then
-    echo "Upgrading $SCRIPT_ID..."
-    kpackagetool6 --type KWin/Script --upgrade "$SCRIPT_DIR/force-csd-decorations"
-else
+# Try upgrade first; fall back to install if the package is not yet present
+if ! kpackagetool6 --type KWin/Script --upgrade "$SCRIPT_DIR/force-csd-decorations" 2>/dev/null; then
     echo "Installing $SCRIPT_ID..."
     kpackagetool6 --type KWin/Script --install "$SCRIPT_DIR/force-csd-decorations"
+else
+    echo "Upgraded $SCRIPT_ID."
 fi
 
 # Reload KWin scripting engine if KWin is running
