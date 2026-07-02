@@ -1,159 +1,117 @@
 'use strict';
 
 (function (workspace, readConfig) {
-    const csd = new CSD();
+    const pending = new WindowSet();
+    const decorateHandlers = new Map();
 
     workspace.windowAdded.connect(function (window) {
-        if (window) {
-            csd.add(window);
+        if (window && isDecoratable(window)) {
+            logWindow(window, 'added');
+            pending.add(window);
         }
     });
 
     workspace.windowActivated.connect(function (window) {
-        if (window) {
-            csd.activate(window);
+        if (!window || !pending.has(window)) {
+            return;
         }
+
+        logWindow(window, 'activating');
+        pending.remove(window);
+
+        if (!window.maximizable) {
+            return;
+        }
+
+        // Trigger a maximize→restore cycle so KWin re-evaluates and applies decoration.
+        // workspace.windowMaximizeSet does not exist in Plasma 6; we use a one-shot
+        // maximizedChanged connection on the window itself instead.
+        const onMaximized = function () {
+            window.maximizedChanged.disconnect(onMaximized);
+            decorateHandlers.delete(window);
+            window.setMaximize(false, false);
+        };
+        decorateHandlers.set(window, onMaximized);
+        window.maximizedChanged.connect(onMaximized);
+        window.setMaximize(true, true);
     });
 
     workspace.windowRemoved.connect(function (window) {
-        if (window) {
-            csd.remove(window);
+        if (!window) {
+            return;
+        }
+
+        pending.remove(window);
+
+        // Clean up any dangling one-shot handler
+        const handler = decorateHandlers.get(window);
+        if (handler) {
+            window.maximizedChanged.disconnect(handler);
+            decorateHandlers.delete(window);
         }
     });
 
-    // Plasma 6: windowMaximizeSet passes (window, horizontal, vertical)
-    workspace.windowMaximizeSet.connect(function (window) {
-        if (window && csd.add(window)) {
-            window.noBorder = false;
-        }
-    });
-
-    function CSD() {
-        const windows = new WindowSet();
-        const pending = new WindowSet();
-        // Store per-window handlers so we can disconnect cleanly
-        const handlers = new Map();
-
-        this.add = function (window) {
-            if (windows.add(window)) {
-                logWindow(window, 'added');
-
-                pending.add(window);
-
-                const handler = function () { activateWindow(window); };
-                handlers.set(window, handler);
-                window.windowShown.connect(handler);
-            }
-
-            return windows.has(window);
-        };
-
-        this.activate = function (window) {
-            if (pending.has(window)) {
-                logWindow(window, 'activating...');
-
-                window.setMaximize(true, true);
-            }
-        };
-
-        this.remove = function (window) {
-            if (windows.remove(window)) {
-                logWindow(window, 'removed');
-
-                pending.remove(window);
-                disconnectHandler(window);
-            }
-        };
-
-        function activateWindow(window) {
-            if (pending.has(window)) {
-                logWindow(window, 'activated');
-
-                pending.remove(window);
-                disconnectHandler(window);
-                window.setMaximize(false, false);
-            }
-        }
-
-        function disconnectHandler(window) {
-            const handler = handlers.get(window);
-            if (handler) {
-                window.windowShown.disconnect(handler);
-                handlers.delete(window);
-            }
-        }
-    }
+    // -------------------------------------------------------------------------
 
     function WindowSet() {
         const windows = [];
-        const specialResourceClasses = ['plasmashell', 'lattedock', 'firefox'];
 
         this.has = function (window) {
             return windows.indexOf(window) !== -1;
         };
 
         this.add = function (window) {
-            if (this.has(window)) {
-                return false;
+            if (!this.has(window)) {
+                windows.push(window);
             }
-
-            if (!windowIsDecoratable(window)) {
-                return false;
-            }
-
-            windows.push(window);
-
-            return true;
         };
 
         this.remove = function (window) {
             const index = windows.indexOf(window);
-
-            if (index === -1) {
-                return false;
+            if (index !== -1) {
+                windows.splice(index, 1);
             }
-
-            windows.splice(index, 1);
-
-            return true;
         };
+    }
 
-        // @see https://techbase.kde.org/Projects/KWin/Window_Decoration_Policy
-        function windowIsDecoratable(window) {
-            if (specialResourceClasses.indexOf(window.resourceClass) !== -1) {
-                return false;
-            }
+    // Resource classes that should never receive forced decoration
+    const SKIP_CLASSES = ['plasmashell', 'lattedock', 'firefox'];
 
-            if (!window.managed) {
-                return false;
-            }
-
-            // Plasma 6: use boolean window-type properties instead of windowType integer
-            const shouldNotDecorate = [
-                window.fullScreen,
-                window.keepAbove && window.shaped,
-                window.specialWindow,
-                window.isDesktop,
-                window.isDock,
-                window.isSplash,
-                window.isDropdownMenu,
-                window.isPopupMenu,
-                window.isTooltip,
-                window.isNotification,
-                window.isComboBox,
-                window.isDNDIcon,
-                window.isCriticalNotification,
-                window.isAppletPopup,
-                window.isPopupWindow,
-            ].indexOf(true);
-
-            if (shouldNotDecorate !== -1) {
-                return false;
-            }
-
-            return window.clientSideDecorated
-                && window.noBorder;
+    // @see https://techbase.kde.org/Projects/KWin/Window_Decoration_Policy
+    function isDecoratable(window) {
+        if (SKIP_CLASSES.indexOf(window.resourceClass) !== -1) {
+            return false;
         }
+
+        if (!window.managed) {
+            return false;
+        }
+
+        // Q_PROPERTY names in Plasma 6 window.h (not the is* C++ method names)
+        const isSpecialType = [
+            window.fullScreen,
+            window.specialWindow,
+            window.desktopWindow,  // Q_PROPERTY: desktopWindow, READ isDesktop
+            window.dock,           // Q_PROPERTY: dock,          READ isDock
+            window.splash,
+            window.dropdownMenu,
+            window.popupMenu,
+            window.tooltip,
+            window.notification,
+            window.comboBox,
+            window.dndIcon,
+            window.criticalNotification,
+            window.appletPopup,
+            window.popupWindow,
+        ].indexOf(true) !== -1;
+
+        if (isSpecialType) {
+            return false;
+        }
+
+        // clientSideDecorated is not exposed in the Plasma 6 scripting API;
+        // noBorder is the reliable proxy: CSD windows have no server-side border.
+        return window.noBorder;
     }
 
     function logWindow(window, context) {
@@ -164,7 +122,6 @@
         console.debug(JSON.stringify({
             isActive: workspace.activeWindow === window,
             resourceClass: window.resourceClass,
-            clientSideDecorated: window.clientSideDecorated,
             noBorder: window.noBorder,
             maximizable: window.maximizable,
             context: context,
